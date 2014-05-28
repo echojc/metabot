@@ -1,6 +1,8 @@
 scalaVersion := "2.11.1"
 
-version := "0.0.0"
+version := "0.0.1-SNAPSHOT"
+
+fork in run := true
 
 resolvers ++= Seq(
   "sonatype-snapshots" at "https://oss.sonatype.org/content/repositories/snapshots/",
@@ -9,7 +11,7 @@ resolvers ++= Seq(
 )
 
 libraryDependencies ++= Seq(
-  "sh.echo" %% "scala-irc-bot" % "0.0.1",
+  "sh.echo" %% "scala-irc-bot" % "0.0.3",
   "ch.qos.logback" % "logback-classic" % "1.1.2",
   "com.typesafe.akka" %% "akka-actor" % "2.3.3",
   "io.spray" %% "spray-client" % "1.3.1-20140423",

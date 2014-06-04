@@ -5,7 +5,7 @@ version := "0.0.1-SNAPSHOT"
 fork in run := true
 
 resolvers ++= Seq(
-  "sonatype-snapshots" at "https://oss.sonatype.org/content/repositories/snapshots/",
+  "sonatype" at "https://oss.sonatype.org/content/repositories/releases/",
   "Typesafe Repository" at "http://repo.typesafe.com/typesafe/releases/",
   "spray repo" at "http://repo.spray.io"
 )
@@ -13,6 +13,7 @@ resolvers ++= Seq(
 libraryDependencies ++= Seq(
   "sh.echo" %% "scala-irc-bot" % "0.0.3",
   "ch.qos.logback" % "logback-classic" % "1.1.2",
+  "org.ocpsoft.prettytime" % "prettytime" % "3.2.5.Final",
   "com.typesafe.akka" %% "akka-actor" % "2.3.3",
   "io.spray" %% "spray-client" % "1.3.1-20140423",
   "io.spray" %% "spray-json" % "1.2.6"

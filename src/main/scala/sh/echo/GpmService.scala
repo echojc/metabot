@@ -25,7 +25,7 @@ object GpmService {
     album: String,
     durationMillis: Int
   ) {
-    override def toString = s"$artist - $title ($album) [id: $id]"
+    override def toString = s"$artist - $title ($album)"
   }
 
   def search(query: String): Future[List[SearchResult]] = {

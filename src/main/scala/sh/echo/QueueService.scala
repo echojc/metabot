@@ -62,7 +62,7 @@ object QueueService {
     pipeline(Post(s"http://$host:$port/users/$userId/queue", HttpEntity(`application/json`, Song(songId).toJson.prettyPrint)))
   }
 
-  def listQueue(userId: String): Future[List[String]] = {
+  def showQueue(userId: String): Future[List[String]] = {
     import DefaultJsonProtocol._
     val pipeline: HttpRequest ⇒ Future[List[String]] = (
       sendReceive

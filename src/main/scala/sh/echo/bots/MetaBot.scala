@@ -57,6 +57,12 @@ class MetaBot extends Bot {
 
   var recentSearchResults: Map[String, List[GpmService.SearchResult]] = Map.empty
 
+  def resolveSongNameWithFallback(songId: String): Future[String] =
+    GpmService.info(songId) map (_ map (_.toString) getOrElse (songId)) recover { case _ ⇒ songId }
+
+  def songExists(songId: String): Future[Boolean] =
+    GpmService.info(songId) map (_.isDefined) recover { case _ ⇒ false }
+
   def search(nick: String, query: String)(reply: String ⇒ Unit): Unit = {
     logger.debug(s"searching for [$query]")
     GpmService.search(query) andThen {
@@ -114,18 +120,58 @@ class MetaBot extends Bot {
 
         QueueService.queue(userInfo.id, requestSongId) andThen {
           case Success(isSuccess) ⇒
-            if (isSuccess)
-              reply(s"queued song id: $songId for $nick")
-            else
-              reply(s"could not queue song id $songId")
+            if (isSuccess) {
+              logger.debug(s"queued song id [$requestSongId]")
+              reply(s"queued song id: $requestSongId for $nick")
+            } else {
+              logger.debug(s"could not queue song id [$requestSongId]")
+              reply(s"could not queue song id $requestSongId")
+            }
           case Failure(e) ⇒
-            logger.error(s"failed to retrieve user list: [$e]")
+            logger.error(s"failed to queue song [$requestSongId]: [$e]")
         }
       case Success(None) ⇒
         logger.debug(s"nick [$nick] wasn't in user list")
         reply("register first you silly sausage")
       case Failure(e) ⇒
-        logger.error(s"failed to retrieve user list: [$e]")
+        logger.error(s"failed to queue song [$songId]: [$e]")
+    }
+  }
+
+  def showQueue(nick: String)(reply: String ⇒ Unit): Unit = {
+    resolveNick(nick) andThen {
+      case Success(Some(userInfo)) ⇒
+        QueueService.showQueue(userInfo.id) flatMap (songIds ⇒ Future.sequence(songIds map (resolveSongNameWithFallback))) andThen {
+          case Success(songs) ⇒
+            logger.debug(s"queried for [$nick]'s queue")
+            if (!songs.isEmpty) {
+              songs.zipWithIndex foreach { case (song, index) ⇒
+                reply(s"${index+1}: $song")
+              }
+            } else {
+              reply("No songs queued.")
+            }
+          case Failure(e) ⇒
+            logger.error(s"failed to retrieve user queue of [$nick]: [$e]")
+        }
+      case Success(None) ⇒
+        logger.debug(s"nick [$nick] wasn't in user list")
+        reply(s"no user $nick")
+      case Failure(e) ⇒
+        logger.error(s"failed to retrieve user queue of [$nick]: [$e]")
+    }
+  }
+
+  def info(songId: String)(reply: String ⇒ Unit): Unit = {
+    GpmService.info(songId) andThen {
+      case Success(Some(songInfo)) ⇒
+        logger.debug(s"resolved song id [$songId] to [$songInfo]")
+        reply(s"$songId -> $songInfo")
+      case Success(None) ⇒
+        logger.debug(s"could not resolve song id [$songId]")
+        reply(s"could not look up id: $songId")
+      case Failure(e) ⇒
+        logger.error(s"failed to resolve song id [$songId]: [$e]")
     }
   }
 
@@ -135,25 +181,38 @@ class MetaBot extends Bot {
   override def onMessage(client: Client, message: Message) = {
     val nick = message.nickname
     val chan = message.channel
+    val replyFun: String ⇒ Unit = sendMessage(client, chan, _)
     CommandParser(message.text) match {
       case Some((command, args)) ⇒
         command match {
           case "search" ⇒
             val query = args.mkString(" ").trim
             if (!query.isEmpty) {
-              search(nick, query)(sendMessage(client, chan, _))
+              search(nick, query)(replyFun)
             } else {
-              sendMessage(client, chan, "Please search for something.")
+              replyFun("Please search for something.")
             }
           case "register" ⇒
-            register(nick)(sendMessage(client, chan, _))
+            register(nick)(replyFun)
           case "users" ⇒
-            listUsers(sendMessage(client, chan, _))
+            listUsers(replyFun)
           case "queue" ⇒
             if (!args.isEmpty) {
-              queue(nick, args(0))(sendMessage(client, chan, _))
+              queue(nick, args(0))(replyFun)
             } else {
-              sendMessage(client, chan, "Please specify a song id.")
+              showQueue(nick)(replyFun)
+            }
+          case "show" ⇒
+            if (!args.isEmpty) {
+              showQueue(args(0))(replyFun)
+            } else {
+              showQueue(nick)(replyFun)
+            }
+          case "info" ⇒
+            if (!args.isEmpty) {
+              info(args(0))(replyFun)
+            } else {
+              replyFun("Please enter a song id.")
             }
           case _ ⇒
             logger.debug(s"MetaBot got command [$command] with args [$args]")

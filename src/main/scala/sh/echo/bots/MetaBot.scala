@@ -16,10 +16,17 @@ import sh.echo.Actors
 import sh.echo.GpmService
 import sh.echo.QueueService
 
-object CommandParser {
-  val CommandPrefix = "!"
+object MetaBot {
+  case class UserInfo(
+    id: String,
+    waitingSince: Option[Long]
+  )
 
-  def apply(text: String): Option[(String, Seq[String])] = {
+  case class MissingUserInfo(nick: String) extends Exception(s"Could not find user info for '$nick'.")
+  case class MissingSongInfo(songId: String) extends Exception(s"Could not resolve song info for '$songId'.")
+
+  val CommandPrefix = "!"
+  def parseCommand(text: String): Option[(String, Seq[String])] = {
     if (text startsWith (CommandPrefix)) {
       val args: Seq[String] = text drop (CommandPrefix.length) split ("\\s+")
       Some((args.head, args.tail))
@@ -29,39 +36,42 @@ object CommandParser {
   }
 }
 
-case class UserInfo(
-  id: String,
-  waitingSince: Option[Long]
-)
-
 class MetaBot extends Bot {
+  import MetaBot._
   import Actors.system.dispatcher
   val logger = LoggerFactory.getLogger(getClass)
   val prettyTime = new PrettyTime()
 
   var userIdCache: Map[String, UserInfo] = Map.empty
-  def refreshUserList(): Future[Map[String, UserInfo]] = {
+  def refreshUserCache(): Future[Map[String, UserInfo]] =
     QueueService.listUsers() map { users ⇒
       val cache = users map { case (id, user) ⇒ (user.nick → UserInfo(id, user.waitingSince)) }
       userIdCache = cache
       cache
     }
-  }
-  def resolveNick(nick: String): Future[Option[UserInfo]] = {
-    val idOption = userIdCache.get(nick)
-    idOption match {
-      case Some(id) ⇒ Future.successful(Option(id))
-      case None ⇒ refreshUserList() map (_.get(nick))
+  def resolveNick(nick: String): Future[UserInfo] =
+    userIdCache.get(nick) match {
+      case Some(id) ⇒
+        Future.successful(id)
+      case None ⇒
+        refreshUserCache() map {
+          _.get(nick) match {
+            case Some(id) ⇒ id
+            case None     ⇒ throw MissingUserInfo(nick)
+          }
+        }
     }
-  }
 
   var recentSearchResults: Map[String, List[GpmService.SearchResult]] = Map.empty
 
   def resolveSongNameWithFallback(songId: String): Future[String] =
-    GpmService.info(songId) map (_ map (_.toString) getOrElse (songId)) recover { case _ ⇒ songId }
+    GpmService.info(songId) map (_.toString) recover { case _ ⇒ songId }
 
-  def songExists(songId: String): Future[Boolean] =
-    GpmService.info(songId) map (_.isDefined) recover { case _ ⇒ false }
+  def resolveSongNamesWithFallback(songIds: List[String]): Future[List[String]] =
+    Future.sequence(songIds map (resolveSongNameWithFallback))
+
+  def resolveSongName(songId: String): Future[String] =
+    GpmService.info(songId) map (_.toString) recover { case _ ⇒ throw MissingSongInfo(songId) }
 
   def search(nick: String, query: String)(reply: String ⇒ Unit): Unit = {
     logger.debug(s"searching for [$query]")
@@ -69,109 +79,154 @@ class MetaBot extends Bot {
       case Success(results) ⇒
         logger.debug(s"caching search results for [$query] by [$nick]: [$results]")
         recentSearchResults = recentSearchResults.updated(nick, results)
-        if (!results.isEmpty) {
-          reply(s"Search results for '$query':")
-          results.zipWithIndex foreach { case (row, index) ⇒
-            reply(s"${index+1}: $row")
-          }
-        } else {
-          reply("No results.")
+        results match {
+          case Nil         ⇒ reply("No results.")
+          case results @ _ ⇒ results.zipWithIndex foreach { case (result, index) ⇒ reply(s"${index + 1}: $result") }
         }
       case Failure(e) ⇒
         logger.error(s"failed to search [$query]: [$e]")
+        reply(s"""Searching for "$query" failed (unknown reason).""")
     }
   }
 
   def register(nick: String)(reply: String ⇒ Unit): Unit = {
     QueueService.register(nick) flatMap (_ ⇒ resolveNick(nick)) andThen {
-      case Success(Some(UserInfo(id, _))) ⇒
-        logger.debug(s"registered [${nick}] as [${id}]")
-        reply(s"Registered ${nick} (${id})")
-      case Success(None) ⇒
-        logger.debug(s"failed to register [${nick}]: nick not found in user list")
-        reply("Failed to register :(")
+      case Success(UserInfo(id, _)) ⇒
+        logger.debug(s"registered [$nick] as [$id]")
+        reply(s"Registered $nick.")
+      case Failure(MissingUserInfo(nick)) ⇒
+        logger.debug(s"failed to register [$nick]: nick not found in user list")
+        reply(s"Registered $nick (but could not look up user info).")
+      case Failure(QueueService.RegistrationFailed(nick)) ⇒
+        logger.error(s"failed to register [$nick]")
+        reply("Registration failed (queue did not accept registration).")
       case Failure(e) ⇒
-        logger.error(s"failed to register [${nick}]: [$e]")
+        logger.error(s"unknown exception while registering [$nick]: [$e]")
+        reply("Registration failed (unknown reason).")
     }
   }
 
   def listUsers(reply: String ⇒ Unit): Unit = {
-    refreshUserList() andThen {
+    refreshUserCache() andThen {
       case Success(users) ⇒
         logger.debug(s"registered users: [$users]")
         reply("Registered users:")
         users foreach { case (nick, UserInfo(id, waitingSince)) ⇒
           val since = waitingSince.fold("never")(t ⇒ prettyTime.format(new Date(t)))
-          reply(s"* $nick ($id) (waiting since: $since)")
+          reply(s"$id: $nick (waiting since: $since)")
         }
       case Failure(e) ⇒
         logger.error(s"failed to retrieve user list: [$e]")
+        reply("Could not retrieve user list.")
     }
   }
 
-  def queue(nick: String, songId: String)(reply: String ⇒ Unit): Unit = {
-    resolveNick(nick) andThen {
-      case Success(Some(userInfo)) ⇒
-        val requestSongId = (for {
-          index               ← Try(songId.toInt).toOption
-          recentSearchResults ← recentSearchResults.get(nick)
-          searchResult        ← recentSearchResults.drop(index-1).headOption
-        } yield searchResult.id).getOrElse(songId)
+  def parseRequestSongId(nick: String, songId: String): String =
+    (for {
+      index               ← Try(songId.toInt).toOption
+      recentSearchResults ← recentSearchResults.get(nick)
+      searchResult        ← recentSearchResults.drop(index-1).headOption
+    } yield searchResult.id).getOrElse(songId)
 
-        QueueService.queue(userInfo.id, requestSongId) andThen {
-          case Success(isSuccess) ⇒
-            if (isSuccess) {
-              logger.debug(s"queued song id [$requestSongId]")
-              reply(s"queued song id: $requestSongId for $nick")
-            } else {
-              logger.debug(s"could not queue song id [$requestSongId]")
-              reply(s"could not queue song id $requestSongId")
-            }
-          case Failure(e) ⇒
-            logger.error(s"failed to queue song [$requestSongId]: [$e]")
-        }
-      case Success(None) ⇒
-        logger.debug(s"nick [$nick] wasn't in user list")
-        reply("register first you silly sausage")
+  def queue(nick: String, songId: String)(reply: String ⇒ Unit): Unit =
+    (for {
+      userInfo      ← resolveNick(nick)
+      requestSongId = parseRequestSongId(nick, songId)
+      songInfo      ← resolveSongName(requestSongId)
+      _             ← QueueService.queue(userInfo.id, requestSongId)
+    } yield songInfo) andThen {
+      case Success(songInfo) ⇒
+        logger.debug(s"queued song [$songInfo]")
+        reply(s"Queued song $songInfo for $nick.")
+      case Failure(QueueService.QueueRequestRejected(userId, songId)) ⇒
+        logger.debug(s"could not queue song [$songId] for user [$userId]")
+        reply(s"Could not queue song for $nick.")
+      case Failure(MissingSongInfo(songId)) ⇒
+        logger.debug(s"tried to queue bad song id [$songId]")
+        reply(s"Could not queue invalid song or queue id $songId.")
+      case Failure(MissingUserInfo(nick)) ⇒
+        logger.debug(s"couldn't resolve [$nick] to id for queuing")
+        reply("Please register first (!register).")
       case Failure(e) ⇒
-        logger.error(s"failed to queue song [$songId]: [$e]")
+        logger.error(s"failed to queue song [$songId] for [$nick]: [$e]")
+        reply("Failed to queue song (unknown error).")
     }
-  }
 
-  def showQueue(nick: String)(reply: String ⇒ Unit): Unit = {
-    resolveNick(nick) andThen {
-      case Success(Some(userInfo)) ⇒
-        QueueService.showQueue(userInfo.id) flatMap (songIds ⇒ Future.sequence(songIds map (resolveSongNameWithFallback))) andThen {
-          case Success(songs) ⇒
-            logger.debug(s"queried for [$nick]'s queue")
-            if (!songs.isEmpty) {
-              songs.zipWithIndex foreach { case (song, index) ⇒
-                reply(s"${index+1}: $song")
-              }
-            } else {
-              reply("No songs queued.")
-            }
-          case Failure(e) ⇒
-            logger.error(s"failed to retrieve user queue of [$nick]: [$e]")
+  def showQueue(nick: String)(reply: String ⇒ Unit): Unit =
+    (for {
+      userInfo  ← resolveNick(nick)
+      songIds   ← QueueService.showQueue(userInfo.id)
+      songInfos ← resolveSongNamesWithFallback(songIds)
+    } yield songInfos) andThen {
+      case Success(songInfos) ⇒
+        logger.debug(s"retrieved queue for [$nick]: [$songInfos]")
+        songInfos match {
+          case Nil ⇒
+            reply("No songs queued.")
+          case songInfos @ _ ⇒
+            reply(s"${nick}'s queue:")
+            songInfos.zipWithIndex foreach { case (songInfo, index) ⇒ reply(s"${index + 1}: $songInfo") }
         }
-      case Success(None) ⇒
-        logger.debug(s"nick [$nick] wasn't in user list")
-        reply(s"no user $nick")
+      case Failure(MissingUserInfo(nick)) ⇒
+        logger.debug(s"couldn't resolve [$nick] to id for retrieving user queue")
+        reply(s"No user $nick.")
       case Failure(e) ⇒
         logger.error(s"failed to retrieve user queue of [$nick]: [$e]")
+        reply(s"Failed to retrieve queue for $nick (unknown error).")
     }
-  }
+
+  def showGlobalQueue(reply: String ⇒ Unit): Unit =
+    (for {
+      queue ← QueueService.showGlobalQueue()
+      songs ← resolveSongNamesWithFallback(queue.data)
+    } yield songs) andThen {
+      case Success(songs) ⇒
+        logger.debug(s"queried for global queue")
+        songs match {
+          case Nil ⇒
+            reply("No songs queued.")
+          case songs @ _ ⇒
+            reply("Global queue:")
+            songs.zipWithIndex foreach { case (song, index) ⇒ reply(s"${index + 1}: $song") }
+        }
+      case Failure(e) ⇒
+        logger.error(s"failed to retrieve global queue: [$e]")
+    }
 
   def info(songId: String)(reply: String ⇒ Unit): Unit = {
     GpmService.info(songId) andThen {
-      case Success(Some(songInfo)) ⇒
+      case Success(songInfo) ⇒
         logger.debug(s"resolved song id [$songId] to [$songInfo]")
-        reply(s"$songId -> $songInfo")
-      case Success(None) ⇒
+        reply(s"$songId: $songInfo")
+      case Failure(MissingSongInfo(songId)) ⇒
         logger.debug(s"could not resolve song id [$songId]")
-        reply(s"could not look up id: $songId")
+        reply(s"""Could not find info on id "$songId".""")
       case Failure(e) ⇒
         logger.error(s"failed to resolve song id [$songId]: [$e]")
+        reply(s"Looking up song id failed (unknown reason).")
+    }
+  }
+
+  def nowPlaying(reply: String ⇒ Unit): Unit = {
+    QueueService.lastPopped() andThen {
+      case Success(Some(songId)) ⇒
+        GpmService.info(songId) andThen {
+          case Success(songInfo) ⇒
+            logger.debug(s"resolved last popped id [$songId] to [$songInfo]")
+            reply(s"Now playing: $songInfo")
+          case Failure(MissingSongInfo(songId)) ⇒
+            logger.debug(s"could not resolve last popped id [$songId]")
+            reply(s"Now playing: $songId (could not resolve song id)")
+          case Failure(e) ⇒
+            logger.error(s"failed to resolve last popped id [$songId]: [$e]")
+            reply(s"Now playing: $songId (unknown failure).")
+        }
+      case Success(None) ⇒
+        logger.debug(s"no last popped")
+        reply(s"Nothing is playing.")
+      case Failure(e) ⇒
+        logger.error(s"failed to retrieve last popped: [$e]")
+        reply(s"Looking up now playing failed (unknown reason).")
     }
   }
 
@@ -182,7 +237,7 @@ class MetaBot extends Bot {
     val nick = message.nickname
     val chan = message.channel
     val replyFun: String ⇒ Unit = sendMessage(client, chan, _)
-    CommandParser(message.text) match {
+    parseCommand(message.text) match {
       case Some((command, args)) ⇒
         command match {
           case "search" ⇒
@@ -200,7 +255,7 @@ class MetaBot extends Bot {
             if (!args.isEmpty) {
               queue(nick, args(0))(replyFun)
             } else {
-              showQueue(nick)(replyFun)
+              showGlobalQueue(replyFun)
             }
           case "show" ⇒
             if (!args.isEmpty) {
@@ -214,6 +269,8 @@ class MetaBot extends Bot {
             } else {
               replyFun("Please enter a song id.")
             }
+          case "np" ⇒
+            nowPlaying(replyFun)
           case _ ⇒
             logger.debug(s"MetaBot got command [$command] with args [$args]")
         }

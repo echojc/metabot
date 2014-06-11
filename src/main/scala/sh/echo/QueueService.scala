@@ -22,12 +22,16 @@ object QueueService {
     nick: String
   )
 
-  def register(nick: String): Future[Boolean] = {
-    val pipeline: HttpRequest ⇒ Future[Boolean] = (
+  case class RegistrationFailed(nick: String) extends Exception(s"Could not register '$nick'.")
+  def register(nick: String): Future[Unit] = {
+    val pipeline: HttpRequest ⇒ Future[StatusCode] = (
       sendReceive
-      ~> ((_: HttpResponse).status == StatusCodes.Created)
+      ~> ((_: HttpResponse).status)
     )
-    pipeline(Post(s"http://$host:$port/users", HttpEntity(`application/json`, RegisterUser(nick).toJson.prettyPrint)))
+    pipeline(Post(s"http://$host:$port/users", HttpEntity(`application/json`, RegisterUser(nick).toJson.prettyPrint))) map {
+      case StatusCodes.Created ⇒ ()
+      case _                   ⇒ throw RegistrationFailed(nick)
+    }
   }
 
   object User extends DefaultJsonProtocol {
@@ -54,12 +58,16 @@ object QueueService {
     data: String
   )
 
-  def queue(userId: String, songId: String): Future[Boolean] = {
-    val pipeline: HttpRequest ⇒ Future[Boolean] = (
+  case class QueueRequestRejected(userId: String, songId: String) extends Exception(s"Could not queue '$songId' for '$userId'.")
+  def queue(userId: String, songId: String): Future[Unit] = {
+    val pipeline: HttpRequest ⇒ Future[StatusCode] = (
       sendReceive
-      ~> ((_: HttpResponse).status == StatusCodes.Created)
+      ~> ((_: HttpResponse).status)
     )
-    pipeline(Post(s"http://$host:$port/users/$userId/queue", HttpEntity(`application/json`, Song(songId).toJson.prettyPrint)))
+    pipeline(Post(s"http://$host:$port/users/$userId/queue", HttpEntity(`application/json`, Song(songId).toJson.prettyPrint))) map {
+      case StatusCodes.Created ⇒ ()
+      case _                   ⇒ throw QueueRequestRejected(userId, songId)
+    }
   }
 
   def showQueue(userId: String): Future[List[String]] = {
@@ -69,6 +77,36 @@ object QueueService {
       ~> unmarshal[List[String]]
     )
     pipeline(Get(s"http://$host:$port/users/$userId/queue"))
+  }
+
+  object Queue extends DefaultJsonProtocol {
+    implicit def jf = jsonFormat1(Queue.apply)
+  }
+  case class Queue(
+    data: List[String]
+  )
+
+  def showGlobalQueue(): Future[Queue] = {
+    val pipeline: HttpRequest ⇒ Future[Queue] = (
+      sendReceive
+      ~> unmarshal[Queue]
+    )
+    pipeline(Get(s"http://$host:$port/queue"))
+  }
+
+  object NullableSong extends DefaultJsonProtocol with NullOptions {
+    implicit def jf = jsonFormat1(NullableSong.apply)
+  }
+  case class NullableSong(
+    data: Option[String]
+  )
+
+  def lastPopped(): Future[Option[String]] = {
+    val pipeline: HttpRequest ⇒ Future[NullableSong] = (
+      sendReceive
+      ~> unmarshal[NullableSong]
+    )
+    pipeline(Get(s"http://$host:$port/queue/last-pop")) map (_.data)
   }
 }
 

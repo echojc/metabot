@@ -1,6 +1,7 @@
 package sh.echo.bots
 
 import java.util.Date
+import scala.collection.mutable
 import scala.concurrent._
 import scala.util.Failure
 import scala.util.Success
@@ -230,12 +231,18 @@ class MetaBot extends Bot {
     }
   }
 
+  val allowedChannels: mutable.Set[String] = mutable.Set("#music-queue")
+
   def sendMessage(client: Client, channel: String, text: String) =
     client.sendMessage(channel, s"[MetaBot]: $text")
 
-  override def onMessage(client: Client, message: Message) = {
+  override def onMessage(client: Client, message: Message): Unit = {
     val nick = message.nickname
     val chan = message.channel
+
+    if (!(allowedChannels contains (chan)))
+      return
+
     val replyFun: String ⇒ Unit = sendMessage(client, chan, _)
     parseCommand(message.text) match {
       case Some((command, args)) ⇒
@@ -271,6 +278,14 @@ class MetaBot extends Bot {
             }
           case "np" ⇒
             nowPlaying(replyFun)
+          case "meta:channels" ⇒
+            args foreach { channel ⇒
+              if (channel startsWith ("remove:"))
+                allowedChannels -= channel drop ("remove:".length)
+              else
+                allowedChannels += channel
+            }
+            sendMessage(client, chan, allowedChannels mkString (", "))
           case _ ⇒
             logger.debug(s"MetaBot got command [$command] with args [$args]")
         }

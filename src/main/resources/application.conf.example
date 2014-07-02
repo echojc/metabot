@@ -1,0 +1,14 @@
+scala-irc-bot {
+  hostname = "irc.example.com"
+  channels = []
+  nickname = "nick"
+  password = "pass"
+  use-ssl = true
+
+  bots {
+    sh-echo-SystemBot = {
+      shutdown-enabled = true
+    }
+    sh-echo-bots-MetaBot = {}
+  }
+}

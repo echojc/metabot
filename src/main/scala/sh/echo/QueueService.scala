@@ -81,10 +81,28 @@ object QueueService {
 
   object Queue extends DefaultJsonProtocol {
     implicit def jf = jsonFormat1(Queue.apply)
+    case class Named(
+      userId: String,
+      songId: String
+    )
   }
   case class Queue(
-    data: List[String]
-  )
+    data: List[Map[String, String]]
+  ) {
+    def named: List[Queue.Named] = (data map { tuple ⇒
+      for {
+        userId ← tuple.keys.headOption
+        songId ← tuple.values.headOption
+      } yield Queue.Named(userId, songId)
+    }).flatten
+
+    def tupled: List[(String, String)] = (data map { tuple ⇒
+      for {
+        userId ← tuple.keys.headOption
+        songId ← tuple.values.headOption
+      } yield (userId, songId)
+    }).flatten
+  }
 
   def showGlobalQueue(): Future[Queue] = {
     val pipeline: HttpRequest ⇒ Future[Queue] = (

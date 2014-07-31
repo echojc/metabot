@@ -23,6 +23,7 @@ object MetaBot {
     waitingSince: Option[Long]
   )
 
+  case class MissingUserId(userId: String) extends Exception(s"Could not find nick for id '$userId'.")
   case class MissingUserInfo(nick: String) extends Exception(s"Could not find user info for '$nick'.")
   case class MissingSongInfo(songId: String) extends Exception(s"Could not resolve song info for '$songId'.")
 
@@ -44,12 +45,14 @@ class MetaBot extends Bot {
   val prettyTime = new PrettyTime()
 
   var userIdCache: Map[String, UserInfo] = Map.empty
+
   def refreshUserCache(): Future[Map[String, UserInfo]] =
     QueueService.listUsers() map { users ⇒
       val cache = users map { case (id, user) ⇒ (user.nick → UserInfo(id, user.waitingSince)) }
       userIdCache = cache
       cache
     }
+
   def resolveNick(nick: String): Future[UserInfo] =
     userIdCache.get(nick) match {
       case Some(id) ⇒
@@ -62,6 +65,25 @@ class MetaBot extends Bot {
           }
         }
     }
+
+  def resolveUserId(userId: String): Future[String] =
+    userIdCache find (_._2.id == userId) match {
+      case Some((nick, _)) ⇒
+        Future.successful(nick)
+      case None ⇒
+        refreshUserCache() map {
+          _ find (_._2.id == userId) match {
+            case Some((nick, _)) ⇒ nick
+            case None            ⇒ throw MissingUserId(userId)
+          }
+        }
+    }
+
+  def resolveUserIdWithFallback(userId: String): Future[String] =
+    resolveUserId(userId) recover { case _: MissingUserId ⇒ userId }
+
+  def resolveUserIdsWithFallback(userIds: List[String]): Future[List[String]] =
+    Future.sequence(userIds map (resolveUserIdWithFallback))
 
   var recentSearchResults: Map[String, List[GpmService.SearchResult]] = Map.empty
 
@@ -178,17 +200,23 @@ class MetaBot extends Bot {
 
   def showGlobalQueue(reply: String ⇒ Unit): Unit =
     (for {
-      queue ← QueueService.showGlobalQueue()
-      songs ← resolveSongNamesWithFallback(queue.data)
-    } yield songs) andThen {
-      case Success(songs) ⇒
+      queue              ← QueueService.showGlobalQueue()
+      (userIds, songIds) = queue.tupled.unzip
+      nicksFuture        = resolveUserIdsWithFallback(userIds)
+      songInfosFuture    = resolveSongNamesWithFallback(songIds)
+      nicks              ← nicksFuture
+      songInfos          ← songInfosFuture
+    } yield nicks zip songInfos) andThen {
+      case Success(nicksAndSongs) ⇒
         logger.debug(s"queried for global queue")
-        songs match {
+        nicksAndSongs match {
           case Nil ⇒
             reply("No songs queued.")
-          case songs @ _ ⇒
+          case nicksAndSongs @ _ ⇒
             reply("Global queue:")
-            songs.zipWithIndex foreach { case (song, index) ⇒ reply(s"${index + 1}: $song") }
+            nicksAndSongs.zipWithIndex foreach { case ((nick, song), index) ⇒
+              reply(s"${index + 1} [$nick]: $song")
+            }
         }
       case Failure(e) ⇒
         logger.error(s"failed to retrieve global queue: [$e]")

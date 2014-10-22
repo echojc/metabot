@@ -2,6 +2,7 @@ package sh.echo.bots
 
 import java.util.Date
 import scala.collection.mutable
+import scala.collection.JavaConversions._
 import scala.concurrent._
 import scala.util.Failure
 import scala.util.Success
@@ -51,6 +52,10 @@ class MetaBot(config: Config) extends Bot {
   val queueHost = config.getString("queue.host")
   val queuePort = config.getInt("queue.port")
   val queueService = new QueueService(queueHost, queuePort)
+
+  val confChannels = config.getStringList("channels").toSeq
+
+  val allowedChannels: mutable.Set[String] = mutable.Set(confChannels: _*)
 
   var userIdCache: Map[String, UserInfo] = Map.empty
 
@@ -268,8 +273,6 @@ class MetaBot(config: Config) extends Bot {
         reply(s"Looking up now playing failed (unknown reason).")
     }
   }
-
-  val allowedChannels: mutable.Set[String] = mutable.Set("#music-queue")
 
   def sendMessage(client: Client, channel: String, text: String) =
     client.sendMessage(channel, s"[MetaBot]: $text")

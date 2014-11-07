@@ -11,9 +11,10 @@ import spray.httpx.SprayJsonSupport._
 import spray.json._
 
 object GpmService {
-  import JsonProtocol._
 
   object SearchResult {
+    import JsonProtocol._
+
     implicit def jf = jsonFormat5(SearchResult.apply)
   }
   case class SearchResult(
@@ -28,11 +29,11 @@ object GpmService {
   case class SongNotFound(songId: String) extends Exception(s"Could not resolve song id '$songId'.")
 }
 class GpmService(host: String, port: Int) {
-  import JsonProtocol._
 
   implicit val arf = Actors.system
   import arf.dispatcher
   import GpmService._
+  import JsonProtocol._
 
   val _infoCache: mutable.Map[String, SearchResult] = mutable.Map.empty
 

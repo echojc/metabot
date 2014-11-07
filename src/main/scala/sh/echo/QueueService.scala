@@ -7,11 +7,12 @@ import spray.http._
 import spray.http.MediaTypes._
 import spray.httpx.SprayJsonSupport._
 import spray.json._
-import JsonProtocol._
 
 object QueueService {
 
   object RegisterUser {
+    import JsonProtocol._
+
     implicit def jf = jsonFormat1(RegisterUser.apply)
   }
   case class RegisterUser(
@@ -20,11 +21,15 @@ object QueueService {
   case class RegistrationFailed(nick: String) extends Exception(s"Could not register '$nick'.")
 
   object User {
+    import JsonProtocol._
+
     implicit def jf = jsonFormat2(User.apply)
   }
   case class User(nick: String, waitingSince: Option[Long])
 
   object Song {
+    import JsonProtocol._
+
     implicit def jf = jsonFormat1(Song.apply)
   }
   case class Song(data: String)
@@ -33,6 +38,8 @@ object QueueService {
     extends Exception(s"Could not queue '$songId' for '$userId'.")
 
   object Queue {
+    import JsonProtocol._
+
     implicit def jf = jsonFormat1(Queue.apply)
     case class Named(userId: String, songId: String)
   }
@@ -53,6 +60,8 @@ object QueueService {
   }
 
   object NullableSong {
+    import JsonProtocol._
+
     implicit def jf = jsonFormat1(NullableSong.apply)
   }
   case class NullableSong(data: Option[String])

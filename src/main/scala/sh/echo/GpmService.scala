@@ -9,9 +9,10 @@ import spray.http._
 import spray.httpx.unmarshalling._
 import spray.httpx.SprayJsonSupport._
 import spray.json._
-import JsonProtocol._
 
 object GpmService {
+  import JsonProtocol._
+
   object SearchResult {
     implicit def jf = jsonFormat5(SearchResult.apply)
   }
@@ -27,6 +28,8 @@ object GpmService {
   case class SongNotFound(songId: String) extends Exception(s"Could not resolve song id '$songId'.")
 }
 class GpmService(host: String, port: Int) {
+  import JsonProtocol._
+
   implicit val arf = Actors.system
   import arf.dispatcher
   import GpmService._

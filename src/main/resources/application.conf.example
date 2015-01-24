@@ -6,9 +6,19 @@ scala-irc-bot {
   use-ssl = true
 
   bots {
-    sh-echo-SystemBot = {
+    sh-echo-SystemBot {
       shutdown-enabled = true
     }
-    sh-echo-bots-MetaBot = {}
+    sh-echo-bots-MetaBot {
+      gpm {
+        host = "localhost"
+        port = 8080
+      }
+      queue {
+        host = "localhost"
+        port = 3000
+      }
+      channels = ["#foo", "#bar"]
+    }
   }
 }

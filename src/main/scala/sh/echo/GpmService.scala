@@ -11,24 +11,29 @@ import spray.httpx.SprayJsonSupport._
 import spray.json._
 
 object GpmService {
-  implicit val arf = Actors.system
-  import arf.dispatcher
 
-  val host = "bv.lan"
-  val port = 8080
+  object SearchResult {
+    import JsonProtocol._
 
-  object SearchResult extends DefaultJsonProtocol {
     implicit def jf = jsonFormat5(SearchResult.apply)
   }
   case class SearchResult(
-    id: String,
-    title: String,
-    artist: String,
-    album: String,
-    durationMillis: Int
-  ) {
+      id: String,
+      title: String,
+      artist: String,
+      album: String,
+      durationMillis: Int) {
     override def toString = s"$artist - $title ($album)"
   }
+
+  case class SongNotFound(songId: String) extends Exception(s"Could not resolve song id '$songId'.")
+}
+class GpmService(host: String, port: Int) {
+
+  implicit val arf = Actors.system
+  import arf.dispatcher
+  import GpmService._
+  import JsonProtocol._
 
   val _infoCache: mutable.Map[String, SearchResult] = mutable.Map.empty
 
@@ -71,8 +76,6 @@ object GpmService {
       else
         Option(unmarshal[T](implicitly[FromResponseUnmarshaller[T]])(response))
   }
-
-  case class SongNotFound(songId: String) extends Exception(s"Could not resolve song id '$songId'.")
   def info(id: String): Future[SearchResult] = {
     val pipeline: HttpRequest ⇒ Future[Option[SearchResult]] = (
       sendReceive ~> unmarshalOption[SearchResult]

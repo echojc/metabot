@@ -2,11 +2,13 @@ package sh.echo.bots
 
 import java.util.Date
 import scala.collection.mutable
+import scala.collection.JavaConversions._
 import scala.concurrent._
 import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
 
+import com.typesafe.config.Config
 import net.mtgto.irc.Bot
 import net.mtgto.irc.Client
 import net.mtgto.irc.event._
@@ -20,8 +22,7 @@ import sh.echo.QueueService
 object MetaBot {
   case class UserInfo(
     id: String,
-    waitingSince: Option[Long]
-  )
+    waitingSince: Option[Long])
 
   case class MissingUserId(userId: String) extends Exception(s"Could not find nick for id '$userId'.")
   case class MissingUserInfo(nick: String) extends Exception(s"Could not find user info for '$nick'.")
@@ -38,16 +39,28 @@ object MetaBot {
   }
 }
 
-class MetaBot extends Bot {
+class MetaBot(config: Config) extends Bot {
   import MetaBot._
   import Actors.system.dispatcher
   val logger = LoggerFactory.getLogger(getClass)
   val prettyTime = new PrettyTime()
 
+  val gpmHost = config.getString("gpm.host")
+  val gpmPort = config.getInt("gpm.port")
+  val gpmService = new GpmService(gpmHost, gpmPort)
+
+  val queueHost = config.getString("queue.host")
+  val queuePort = config.getInt("queue.port")
+  val queueService = new QueueService(queueHost, queuePort)
+
+  val confChannels = config.getStringList("channels").toSeq
+
+  val allowedChannels: mutable.Set[String] = mutable.Set(confChannels: _*)
+
   var userIdCache: Map[String, UserInfo] = Map.empty
 
   def refreshUserCache(): Future[Map[String, UserInfo]] =
-    QueueService.listUsers() map { users ⇒
+    queueService.listUsers() map { users ⇒
       val cache = users map { case (id, user) ⇒ (user.nick → UserInfo(id, user.waitingSince)) }
       userIdCache = cache
       cache
@@ -88,17 +101,17 @@ class MetaBot extends Bot {
   var recentSearchResults: Map[String, List[GpmService.SearchResult]] = Map.empty
 
   def resolveSongNameWithFallback(songId: String): Future[String] =
-    GpmService.info(songId) map (_.toString) recover { case _ ⇒ songId }
+    gpmService.info(songId) map (_.toString) recover { case _ ⇒ songId }
 
   def resolveSongNamesWithFallback(songIds: List[String]): Future[List[String]] =
     Future.sequence(songIds map (resolveSongNameWithFallback))
 
   def resolveSongName(songId: String): Future[String] =
-    GpmService.info(songId) map (_.toString) recover { case _ ⇒ throw MissingSongInfo(songId) }
+    gpmService.info(songId) map (_.toString) recover { case _ ⇒ throw MissingSongInfo(songId) }
 
   def search(nick: String, query: String)(reply: String ⇒ Unit): Unit = {
     logger.debug(s"searching for [$query]")
-    GpmService.search(query) andThen {
+    gpmService.search(query) andThen {
       case Success(results) ⇒
         logger.debug(s"caching search results for [$query] by [$nick]: [$results]")
         recentSearchResults = recentSearchResults.updated(nick, results)
@@ -113,7 +126,7 @@ class MetaBot extends Bot {
   }
 
   def register(nick: String)(reply: String ⇒ Unit): Unit = {
-    QueueService.register(nick) flatMap (_ ⇒ resolveNick(nick)) andThen {
+    queueService.register(nick) flatMap (_ ⇒ resolveNick(nick)) andThen {
       case Success(UserInfo(id, _)) ⇒
         logger.debug(s"registered [$nick] as [$id]")
         reply(s"Registered $nick.")
@@ -134,9 +147,10 @@ class MetaBot extends Bot {
       case Success(users) ⇒
         logger.debug(s"registered users: [$users]")
         reply("Registered users:")
-        users foreach { case (nick, UserInfo(id, waitingSince)) ⇒
-          val since = waitingSince.fold("never")(t ⇒ prettyTime.format(new Date(t)))
-          reply(s"$id: $nick (waiting since: $since)")
+        users foreach {
+          case (nick, UserInfo(id, waitingSince)) ⇒
+            val since = waitingSince.fold("never")(t ⇒ prettyTime.format(new Date(t)))
+            reply(s"$id: $nick (waiting since: $since)")
         }
       case Failure(e) ⇒
         logger.error(s"failed to retrieve user list: [$e]")
@@ -146,17 +160,17 @@ class MetaBot extends Bot {
 
   def parseRequestSongId(nick: String, songId: String): String =
     (for {
-      index               ← Try(songId.toInt).toOption
+      index ← Try(songId.toInt).toOption
       recentSearchResults ← recentSearchResults.get(nick)
-      searchResult        ← recentSearchResults.drop(index-1).headOption
+      searchResult ← recentSearchResults.drop(index - 1).headOption
     } yield searchResult.id).getOrElse(songId)
 
   def queue(nick: String, songId: String)(reply: String ⇒ Unit): Unit =
     (for {
-      userInfo      ← resolveNick(nick)
+      userInfo ← resolveNick(nick)
       requestSongId = parseRequestSongId(nick, songId)
-      songInfo      ← resolveSongName(requestSongId)
-      _             ← QueueService.queue(userInfo.id, requestSongId)
+      songInfo ← resolveSongName(requestSongId)
+      _ ← queueService.queue(userInfo.id, requestSongId)
     } yield songInfo) andThen {
       case Success(songInfo) ⇒
         logger.debug(s"queued song [$songInfo]")
@@ -177,8 +191,8 @@ class MetaBot extends Bot {
 
   def showQueue(nick: String)(reply: String ⇒ Unit): Unit =
     (for {
-      userInfo  ← resolveNick(nick)
-      songIds   ← QueueService.showQueue(userInfo.id)
+      userInfo ← resolveNick(nick)
+      songIds ← queueService.showQueue(userInfo.id)
       songInfos ← resolveSongNamesWithFallback(songIds)
     } yield songInfos) andThen {
       case Success(songInfos) ⇒
@@ -200,12 +214,12 @@ class MetaBot extends Bot {
 
   def showGlobalQueue(reply: String ⇒ Unit): Unit =
     (for {
-      queue              ← QueueService.showGlobalQueue()
+      queue ← queueService.showGlobalQueue()
       (userIds, songIds) = queue.tupled.unzip
-      nicksFuture        = resolveUserIdsWithFallback(userIds)
-      songInfosFuture    = resolveSongNamesWithFallback(songIds)
-      nicks              ← nicksFuture
-      songInfos          ← songInfosFuture
+      nicksFuture = resolveUserIdsWithFallback(userIds)
+      songInfosFuture = resolveSongNamesWithFallback(songIds)
+      nicks ← nicksFuture
+      songInfos ← songInfosFuture
     } yield nicks zip songInfos) andThen {
       case Success(nicksAndSongs) ⇒
         logger.debug(s"queried for global queue")
@@ -214,8 +228,9 @@ class MetaBot extends Bot {
             reply("No songs queued.")
           case nicksAndSongs @ _ ⇒
             reply("Global queue:")
-            nicksAndSongs.zipWithIndex foreach { case ((nick, song), index) ⇒
-              reply(s"${index + 1} [$nick]: $song")
+            nicksAndSongs.zipWithIndex foreach {
+              case ((nick, song), index) ⇒
+                reply(s"${index + 1} [$nick]: $song")
             }
         }
       case Failure(e) ⇒
@@ -223,7 +238,7 @@ class MetaBot extends Bot {
     }
 
   def info(songId: String)(reply: String ⇒ Unit): Unit = {
-    GpmService.info(songId) andThen {
+    gpmService.info(songId) andThen {
       case Success(songInfo) ⇒
         logger.debug(s"resolved song id [$songId] to [$songInfo]")
         reply(s"$songId: $songInfo")
@@ -237,9 +252,9 @@ class MetaBot extends Bot {
   }
 
   def nowPlaying(reply: String ⇒ Unit): Unit = {
-    QueueService.lastPopped() andThen {
+    queueService.lastPopped() andThen {
       case Success(Some(songId)) ⇒
-        GpmService.info(songId) andThen {
+        gpmService.info(songId) andThen {
           case Success(songInfo) ⇒
             logger.debug(s"resolved last popped id [$songId] to [$songInfo]")
             reply(s"Now playing: $songInfo")
@@ -258,8 +273,6 @@ class MetaBot extends Bot {
         reply(s"Looking up now playing failed (unknown reason).")
     }
   }
-
-  val allowedChannels: mutable.Set[String] = mutable.Set("#music-queue")
 
   def sendMessage(client: Client, channel: String, text: String) =
     client.sendMessage(channel, s"[MetaBot]: $text")

@@ -9,20 +9,69 @@ import spray.httpx.SprayJsonSupport._
 import spray.json._
 
 object QueueService {
-  implicit val arf = Actors.system
-  import arf.dispatcher
 
-  val host = "fg.lan"
-  val port = 3000
+  object RegisterUser {
+    import JsonProtocol._
 
-  object RegisterUser extends DefaultJsonProtocol {
     implicit def jf = jsonFormat1(RegisterUser.apply)
   }
   case class RegisterUser(
-    nick: String
-  )
+    nick: String)
 
   case class RegistrationFailed(nick: String) extends Exception(s"Could not register '$nick'.")
+
+  object User {
+    import JsonProtocol._
+
+    implicit def jf = jsonFormat2(User.apply)
+  }
+  case class User(nick: String, waitingSince: Option[Long])
+
+  object Song {
+    import JsonProtocol._
+
+    implicit def jf = jsonFormat1(Song.apply)
+  }
+  case class Song(data: String)
+
+  case class QueueRequestRejected(userId: String, songId: String)
+    extends Exception(s"Could not queue '$songId' for '$userId'.")
+
+  object Queue {
+    import JsonProtocol._
+
+    implicit def jf = jsonFormat1(Queue.apply)
+    case class Named(userId: String, songId: String)
+  }
+  case class Queue(data: List[Map[String, String]]) {
+    def named: List[Queue.Named] = (data map { tuple ⇒
+      for {
+        userId ← tuple.keys.headOption
+        songId ← tuple.values.headOption
+      } yield Queue.Named(userId, songId)
+    }).flatten
+
+    def tupled: List[(String, String)] = (data map { tuple ⇒
+      for {
+        userId ← tuple.keys.headOption
+        songId ← tuple.values.headOption
+      } yield (userId, songId)
+    }).flatten
+  }
+
+  object NullableSong {
+    import JsonProtocol._
+
+    implicit def jf = jsonFormat1(NullableSong.apply)
+  }
+  case class NullableSong(data: Option[String])
+
+}
+class QueueService(host: String, port: Int) {
+  implicit val arf = Actors.system
+  import arf.dispatcher
+  import QueueService._
+
   def register(nick: String): Future[Unit] = {
     val pipeline: HttpRequest ⇒ Future[StatusCode] = (
       sendReceive
@@ -34,14 +83,6 @@ object QueueService {
     }
   }
 
-  object User extends DefaultJsonProtocol {
-    implicit def jf = jsonFormat2(User.apply)
-  }
-  case class User(
-    nick: String,
-    waitingSince: Option[Long]
-  )
-
   def listUsers(): Future[Map[String, User]] = {
     import DefaultJsonProtocol._
     val pipeline: HttpRequest ⇒ Future[Map[String, User]] = (
@@ -51,14 +92,6 @@ object QueueService {
     pipeline(Get(s"http://$host:$port/users"))
   }
 
-  object Song extends DefaultJsonProtocol {
-    implicit def jf = jsonFormat1(Song.apply)
-  }
-  case class Song(
-    data: String
-  )
-
-  case class QueueRequestRejected(userId: String, songId: String) extends Exception(s"Could not queue '$songId' for '$userId'.")
   def queue(userId: String, songId: String): Future[Unit] = {
     val pipeline: HttpRequest ⇒ Future[StatusCode] = (
       sendReceive
@@ -79,31 +112,6 @@ object QueueService {
     pipeline(Get(s"http://$host:$port/users/$userId/queue"))
   }
 
-  object Queue extends DefaultJsonProtocol {
-    implicit def jf = jsonFormat1(Queue.apply)
-    case class Named(
-      userId: String,
-      songId: String
-    )
-  }
-  case class Queue(
-    data: List[Map[String, String]]
-  ) {
-    def named: List[Queue.Named] = (data map { tuple ⇒
-      for {
-        userId ← tuple.keys.headOption
-        songId ← tuple.values.headOption
-      } yield Queue.Named(userId, songId)
-    }).flatten
-
-    def tupled: List[(String, String)] = (data map { tuple ⇒
-      for {
-        userId ← tuple.keys.headOption
-        songId ← tuple.values.headOption
-      } yield (userId, songId)
-    }).flatten
-  }
-
   def showGlobalQueue(): Future[Queue] = {
     val pipeline: HttpRequest ⇒ Future[Queue] = (
       sendReceive
@@ -111,13 +119,6 @@ object QueueService {
     )
     pipeline(Get(s"http://$host:$port/queue"))
   }
-
-  object NullableSong extends DefaultJsonProtocol with NullOptions {
-    implicit def jf = jsonFormat1(NullableSong.apply)
-  }
-  case class NullableSong(
-    data: Option[String]
-  )
 
   def lastPopped(): Future[Option[String]] = {
     val pipeline: HttpRequest ⇒ Future[NullableSong] = (
